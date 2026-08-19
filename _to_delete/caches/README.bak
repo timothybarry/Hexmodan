@@ -1,0 +1,375 @@
+# AZMO Mind 0.2.9
+
+The local cognition and performance engine for the **AZMO hexapod** — a
+machine-incarnate interpretation of Azmodan, Lord of Sin, who listens, thinks,
+speaks in a cloned voice, and proposes physical gestures to a motor controller
+that he is never allowed to command directly.
+
+Everything runs offline on the builder's own hardware. No cloud in normal
+operation.
+
+> **New session? Read this file, then `docs/DESIGN_LOG.md`, then `HANDOFF.md`.**
+> This is the *what and why*; the design log is *what was decided lately and on
+> what reasoning*, newest first; HANDOFF.md is *where we are today*, including
+> known defects. `AZMO_PROJECT_BRIEF.md` is the full charter and remains the
+> master document.
+>
+> Where they disagree, the design log is newer. Then fix the older one.
+
+---
+
+## 1. What AZMO is
+
+A six-legged robot with a character, not an assistant with a costume. The design
+goal is a convincing presence: theatrical, strategic, arrogant, tempting, and
+grounded enough to be genuinely useful. He must never claim to perceive things
+he cannot perceive, and he must never be able to hurt anyone.
+
+**The two hard product goals, in tension:**
+
+1. **Responsive** — target ≤4 s from you finishing your sentence to hearing his
+   first word.
+2. **Undegraded** — his personality and vocal delivery must not get worse in
+   pursuit of goal 1.
+
+Most of the engineering in this repo is the negotiation between those two.
+
+---
+
+## 2. Current state
+
+Working today on the Windows dev machine, end to end:
+
+| Subsystem | State |
+|---|---|
+| **Brain** | qwen3.5:9b via Ollama. Lore-informed prompt, SQLite memory, 8-dimension emotional state, structured JSON output (speech, emotion, one allowlisted gesture, voice direction). |
+| **Ears** | `azmo listen` — mic → webrtcvad → faster-whisper (small.en, CPU) → brain. Wake word "Azmodan" via phonetic matching plus decoder biasing. |
+| **Voice** | XTTS v2 clone of the Azmodan game voice, plus a custom "azmo-voice" DSP chain. **This sounds right — preserve the synthesis.** |
+| **Presence** | Pre-rendered non-verbals — a slow exhale, a low growl — played *while he thinks*, repeated for as long as the turn runs. Ships empty; build and curate it by ear. |
+| **Motion** | Simulated only. `motion_link.py` speaks the real Jetson↔Teensy command envelope and lifecycle. No hardware yet — legs are Paul's lead, post-POC. |
+| **Safety** | Deterministic arbiter clamps intensity/duration, enforces a gesture allowlist, refuses unsafe requests. Runs after the model, always. |
+
+`azmo check` is the preflight. For the test count, run `python -m pytest -q` —
+this file used to quote a number and the number was wrong.
+
+**What this project currently is: a POC.** The deliverable is a convincing enough
+Azmodan on the desktop that buying the Jetson becomes an obvious decision. It is
+judged by ear, in live conversation. Hardware is downstream of that.
+
+---
+
+## 3. Architecture
+
+### Dual-brain boundary (non-negotiable)
+
+```
+you speak
+  → azmo-listener   wake word, VAD, transcription
+  → azmo-brain      LLM proposes a structured AzmoResponse
+  → safety arbiter  deterministic clamp + allowlist  ← the LLM cannot bypass this
+  → azmo-speech     TTS
+  → azmo-voice      demonic DSP chain
+  → azmo-motion-link  command envelope → Teensy 4.1 → servos
+```
+
+**The LLM never owns safety-critical hardware, the serial port, or its own
+emotional state.** It proposes intent by name and intensity; deterministic code
+decides what actually happens. The Teensy independently validates everything it
+receives. This boundary is the single most important design rule in the project.
+
+### Turn flow
+
+Untrusted input → bounded deterministic state update → memory retrieval →
+lore-informed system prompt → local model proposes a validated `AzmoResponse` →
+safety arbitration → motion link → text, voice, metrics, gesture timeline.
+
+See `docs/ARCHITECTURE.md` and brief §4–6.
+
+---
+
+## 4. The voice (locked — preserve these)
+
+Tuned over many iterations to a take the builder approved. In `config/azmo.yaml`:
+
+- `clone_temperature: 0.26`, `clone_seed: 20260726` — fixed seed means the same
+  line renders identically every time.
+- `clone_split_text: false` — XTTS's own splitting re-rolled sampling per
+  sentence and made the character drift. We chunk ourselves instead
+  (`clone_max_chars: 220`) and **re-seed each chunk**, which is what keeps him
+  consistent.
+- `dsp.use_world: false` — **critical.** WORLD vocoder re-synthesis was the cause
+  of the "underwater" sound. Pitch and formant ratios stay at 1.0. The clone is
+  already deep; character comes from EQ + grit + sub layers over an untouched
+  primary voice.
+- `intensity_bias: 0.67`, `heaviness_variation: 0.05` — a *locked register*.
+  High variation made him drift "too human" on calm lines.
+
+**Do not reintroduce `use_world` or pitch shifting.** Wanting less variation
+still means lowering `heaviness_variation`, not changing the chain.
+
+---
+
+## 4b. Presence — the sounds he makes while *not* speaking
+
+The problem is dead air, not latency. A machine that sits silent while it thinks
+reads as broken; one that audibly turns the question over reads as thinking.
+This is why the ≤4 s figure is a goal rather than a rule: **a long reply is
+allowed to be long, provided the wait is not silent.**
+
+He has no body yet, so audio is the only channel he has. `presence.py` plays
+short **pre-rendered** non-verbals — a slow deliberate exhale, a low considering
+growl — while the LLM works. Pre-rendered is the whole point: no model, no GPU,
+no synthesis at request time, so the first sound lands in well under a second no
+matter how long the reply takes.
+
+Three properties, each deliberate:
+
+- **A pool, not a clip.** One breath on repeat becomes a tic inside a single
+  session, so `avoid_repeat_window` blocks a clip from returning too soon.
+- **Sustained, not one-shot.** A sound at t=0 does nothing for someone still
+  waiting at t=9. He keeps breathing every `sustain_gap_ms` for as long as the
+  turn runs, capped by `max_sustain_clips` so a wedged turn becomes silence
+  rather than an endless growl. **`sustain_gap_ms` is the setting that matters.**
+- **He never speaks over his own breath.** The think block waits for the clip in
+  flight to drain before his words begin. Overlap would read as a glitch, which
+  is the exact failure presence exists to remove.
+
+An empty pool, a missing audio backend or an unreadable WAV all degrade to
+silence. A turn with a real reply and no breath in front of it is still a good
+turn.
+
+**Half-duplex still applies — presence is a second sound source.** The thinking
+track runs inside the existing `listener.deaf()` window. The wake-word breath
+opens its own, because it fires while the mic is live and waiting for your
+command; without that gate, webrtcvad trips on his own breath and Whisper hands
+back whatever it makes of it *as the command*.
+
+```powershell
+azmo presence build              # render the pool (needs the GPU; run once)
+azmo presence test --seconds 12  # simulate a long think; listen for looping
+```
+
+**The pool ships empty, and curating it is the job.** Which breath spellings
+render convincingly is empirical, not specifiable — build, listen, delete
+everything that sounds like words or sounds cut off. A small curated pool beats
+a large sloppy one. Hand-recorded or sourced WAVs dropped into
+`data/presence/<kind>/` work identically; the player does not care where they
+came from.
+
+---
+
+## 5. Hands-free, and why it is hard
+
+AZMO says his own name in nearly every reply. Any audio of his own voice
+reaching the transcriber is a wake word, and he answers himself forever. Three
+independent guards, all in `listener.py`:
+
+1. **Gate at the capture callback** — while he thinks or speaks, frames are
+   discarded before they are ever queued.
+2. **`post_speech_cooldown_ms`** — the gate stays shut past the end of playback,
+   covering the speaker tail and room reverb.
+3. **`EchoGuard`** — discards any transcript that is mostly a repeat of his last
+   reply, in case his voice reaches the mic anyway.
+
+**Never set `listener.always_on: true`** — it removes the wake word as a guard.
+`azmo check` warns if it is on.
+
+Wake-word recognition is its own problem: "Azmodan" is not in Whisper's
+vocabulary, so it emits whatever English it sounds like ("As Madam", "As been
+in"). Solved by biasing the decoder (`whisper_initial_prompt`), capturing the
+full word (`pre_roll_ms`, lower VAD aggressiveness), and matching phonetically
+rather than by spelling. Details in HANDOFF.md.
+
+---
+
+## 6. Hardware
+
+**Development:** i7-8700K, 32 GB, RTX 3080 Ti 12 GB, Windows 10.
+PSU being replaced with a Montech Century II 1050 W ATX 3.1 — see §8.
+
+**Target robot:**
+
+- **Jetson Orin NX** (Waveshare dev kit SKU 24222, 8 GB or 16 GB module) —
+  cognition, perception, decision-making.
+- **Teensy 4.1** — real-time motor control, gait, IK, safety reflexes,
+  heartbeats, e-stop. Runs at 250 Hz independent of anything the Jetson does.
+- USB CDC serial between them. Servo power rail electrically separate.
+
+---
+
+## 7. Performance: the decisions and why
+
+Full analysis in `docs/PERFORMANCE.md`; edge plan in `docs/JETSON_MIGRATION.md`.
+
+### The number that governs everything
+
+Token generation must read every model weight from memory for every token:
+
+```
+tokens/sec ceiling = memory bandwidth / model size
+```
+
+The 3080 Ti has ~912 GB/s; the Orin NX has ~102 GB/s — **9× less**. That single
+ratio predicts the whole edge port.
+
+### Decisions taken
+
+**Voice: keep XTTS, add streaming. Do not switch to Piper.**
+The stated goal is no delivery degradation, and XTTS is the only option that
+preserves the exact cloned voice. Piper would hit the latency target more
+easily but is a different model producing a different voice. Piper stays as the
+documented fallback, not the plan.
+
+**Overlap the LLM and the voice — this is the key architectural change.**
+Today the pipeline is strictly serial: generate the entire reply, then
+synthesize the entire reply. Instead, stream tokens from Ollama, detect the
+first complete sentence, and start XTTS on it immediately while the rest is
+still being written.
+
+This has a consequence worth understanding: **once the stages overlap, the LLM
+leaves the critical path.** Only the first sentence affects time-to-first-word.
+Speech is spoken at roughly 3.4 tokens/sec, so even a 9B model at 13 tok/s
+generates faster than he can talk. Model size therefore becomes a *quality and
+memory* decision, not a latency one.
+
+**Transcription: `small.en` on GPU, plus a dedicated hotword engine.**
+`tiny.en` is faster but noticeably worse on unusual words, and wake-word
+mishearing has already cost real debugging time. The command itself is the
+actual instruction — accuracy matters more than 200 ms there. Separately,
+running a full transcription model continuously just to catch a wake word is
+indefensible on a battery-powered robot; a purpose-trained hotword engine
+(openWakeWord / Porcupine) runs always-on at ~1% of one core behind the existing
+`WakeDetector` interface. Cheap detection, accurate transcription.
+
+**Prompt ordering must change.** Prefix caching lets the model reuse work on
+unchanged prompt text. But `prompts.py` currently places volatile content
+(emotional state, retrieved memories) *in the middle*, ahead of ~6 KB of static
+lore. The cache dies at that point and everything after is re-read every turn —
+about 4.8 s of prefill on an Orin instead of 0.6 s. Moving volatile content to
+the end is a small change with a very large payoff.
+
+**Model size: undecided by design.** Use `azmo compare` (below) and judge by
+reading and listening. The failure mode of a smaller model is not invalid output
+— Ollama's grammar constrains the JSON regardless — it is *valid but worse*
+choices: an allowed gesture that does not fit the line, stock phrasing instead
+of novel imagery, breaking character under pressure.
+
+### Applied already
+
+Warm-up now matches generation's `num_ctx` (a mismatch was fully reloading the
+model every session, 6–11 s). `context_tokens` 8192→4096, `max_output_tokens`
+320→200, `max_spoken_words` 100→70. Every turn prints its own timing breakdown.
+
+---
+
+## 8. Known defects and landmines
+
+**Read `HANDOFF.md` before changing anything in these areas.**
+
+- **cuDNN version mismatch in `.venv312`** — worked around, not fixed. torch
+  wants cuDNN 9, the installed copy is v8. Worked around with
+  `speech.clone_disable_cudnn: true`. **Snapshot with `pip freeze` before any
+  install in that venv.** Blocks moving Whisper to the GPU on the desktop.
+- **PC hard-crashes under load** — diagnosed as GPU power transients tripping an
+  aging PSU, not a software fault. AI inference is a square wave (near-idle to
+  full load ~79×/second); games are a smooth plateau. PSUs trip on peak current,
+  not average. New ATX 3.1 supply is the real fix. Mitigations in `gpu.py`:
+  temporary 250 W cap, stagger between GPU workloads, VRAM released between
+  turns. **Restore full GPU power before gaming** — `RESTORE_GPU_POWER.bat`.
+- **XTTS aborts natively** if handed >250 characters (its generation window),
+  if wrapped in `torch.inference_mode()`, or if `torch.backends.cudnn` is
+  touched. All three cost a debugging session each.
+- **Warm-up order is load-bearing** — ears before voice. Loading torch first made
+  XTTS abort during model load.
+- **All `.ps1` / `.bat` files must be pure ASCII.** An em-dash once broke
+  PowerShell parsing.
+- **Fragile ML pins:** `coqui-tts==0.24.2` + `transformers==4.42.4`, torch
+  2.5.1+cu121 installed explicitly and first. `webrtcvad-wheels`, not
+  `webrtcvad`.
+
+---
+
+## 9. Commands
+
+```powershell
+START_AZMO_VOICE.bat        # hands-free: ears + brain + voice (asks for admin: GPU cap)
+START_AZMO.bat              # text chat
+RESTORE_GPU_POWER.bat       # before gaming
+DIAGNOSE_VOICE.bat          # locate a native crash in the voice stack
+```
+
+```powershell
+azmo check                  # preflight: brain, voice, ears, presence, GPU power, VRAM
+azmo listen                 # hands-free conversation
+azmo chat                   # text conversation
+azmo hear                   # mic + wake-word diagnostic, no LLM or voice loaded
+azmo say "text"             # voice test, no LLM
+azmo compare --models a,b,c # run the same prompts through several models
+azmo voicetune "line"       # render a line across a tuning grid
+azmo presence build         # render his thinking sounds (GPU; run once, then curate)
+azmo presence list          # what is in the pool
+azmo presence test          # simulate a long think - listen for looping
+azmo gpu status|cap|restore # temporary power cap
+azmo doctor --warmup        # environment + live inference
+azmo eval                   # personality and gesture regression cases
+```
+
+Chat commands: `/help /state /status /warmup /lore /memories /remember <fact>
+/forget <id> /json on|off /mute /unmute /voice /reset /quit`
+
+---
+
+## 10. Layout
+
+```text
+src/azmo_mind/
+  cli.py           all commands
+  engine.py        turn orchestration (state → prompt → model → arbiter → motion)
+  listener.py      mic, VAD, wake word, transcription, half-duplex guards
+  speech.py        TTS adapters (clone / piper / SAPI / espeak / silent) + chunking
+  voice_dsp.py     the azmo-voice demonic DSP chain (pedalboard)
+  presence.py      pooled non-verbals played while he thinks (azmo-presence)
+  gpu.py           power cap, VRAM budget, workload staggering
+  motion_link.py   command envelope, lifecycle, simulated Teensy link
+  safety.py        deterministic arbiter
+  schemas.py       AzmoResponse: 12 emotions, 16 gestures, 9 voice presets
+  prompts.py       lore-informed system prompt (static prefix + volatile suffix)
+  memory.py        SQLite turns + rated explicit memories
+  state.py         8-dimension bounded emotional state (the LLM never writes it)
+  providers/       ollama / mock behind a replaceable interface
+config/            azmo.yaml (real), mock.yaml (offline testing)
+data/presence/     his thinking sounds: exhale/*.wav, growl/*.wav (built, curated)
+docs/              DESIGN_LOG (dated decisions), ARCHITECTURE, PERFORMANCE,
+                   JETSON_MIGRATION, lore, personality, dialogue style, gestures
+tests/  eval/      unit + personality regression cases
+```
+
+---
+
+## 11. Roadmap
+
+The near-term list is POC work: make him convincing on the desktop. Everything
+hardware-shaped waits until that has succeeded.
+
+| | |
+|---|---|
+| **Now** | Install the 1050 W PSU. Build and curate the presence pool (`azmo presence build`, then listen and delete). Soak-test hands-free with presence live — his own breath is a new way to false-wake. |
+| **Next** | LLM + voice streaming **with a prebuffer** so he never stutters mid-line, fixed-gain DSP so per-chunk rendering matches today's single pass, `azmo compare` to settle model size *upward*. |
+| **After the POC** | Buy the Jetson. Hotword `WakeDetector`, service split (brief §5), behaviour executive, motion-link service, Teensy protocol. |
+| **0.7** | Teensy firmware: command parser, heartbeats, gait, IK, fault injection. |
+| **0.9** | Physical Jetson↔Teensy integration, unloaded servo bench tests. |
+| **Later** | Cameras and perception, LoRA tuning only after hundreds of rated real conversations. |
+
+---
+
+## 12. Working agreement
+
+Build a reliable character system before fine-tuning — prompting, memory, state
+and structured output first. Never let the LLM own safety-critical hardware.
+Keep the model-provider interface replaceable. Optimize for *perceived*
+responsiveness, not model size. **Measure latency rather than guessing.** Test
+failure deliberately before untethered walking.
+
+One note on scope: the voice is cloned from a game actor's performance. That is
+fine for a private build; it carries a likeness question if AZMO is ever
+published. Brief §8 and §15.

@@ -1,0 +1,2 @@
+[console_scripts]
+azmo = azmo_mind.cli:app

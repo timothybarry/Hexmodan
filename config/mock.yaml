@@ -1,0 +1,51 @@
+provider:
+  kind: mock
+  base_url: http://localhost:11434
+  model: mock
+  timeout_seconds: 30
+  temperature: 0
+  top_p: 1
+  repeat_penalty: 1
+  context_tokens: 2048
+  max_output_tokens: 128
+  keep_alive: 1m
+  think: false
+
+character:
+  name: Azmo
+  canonical_name: Azmodan
+  title: Lord of Sin
+  owner_name: Timothy
+  embodiment: machine_incarnation
+  max_spoken_words: 100
+  theatricality: 0.82
+  strategic_mind: 0.80
+  temptation: 0.62
+  arrogance: 0.78
+  humor: 0.36
+  menace: 0.66
+  warmth: 0.18
+  profanity: restrained
+
+memory:
+  database_path: data/azmo_mock_memory.sqlite3
+  recent_turns: 8
+  retrieved_memories: 5
+
+motion:
+  hardware_enabled: false
+  max_intensity: 0.75
+  min_duration_ms: 350
+  max_duration_ms: 4500
+  simulator_step_ms: 250
+
+runtime:
+  save_raw_model_output: false
+  log_path: data/azmo_mock_runtime.jsonl
+  warmup_on_chat_start: false
+  show_generation_metrics: true
+  show_gesture_timeline: true
+
+speech:
+  enabled: false
+  engine: none

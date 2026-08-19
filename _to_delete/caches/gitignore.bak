@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+data/*.sqlite3
+data/*.jsonl
+data/emotion_state.json
+dist/
+build/
+*.egg-info/
+
+# Presence clips are built locally and curated by ear - not source.
+data/presence/**/*.wav

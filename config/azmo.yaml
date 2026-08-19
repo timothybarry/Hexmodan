@@ -1,0 +1,329 @@
+provider:
+  kind: ollama
+  base_url: http://localhost:11434
+  model: llama3.1:8b
+  timeout_seconds: 300
+  temperature: 0.48
+  top_p: 0.90
+  repeat_penalty: 1.12
+  # The real prompt measures ~2500 tokens (system prompt + lore docs + 8 turns
+  # + memories), so 8192 was reserving a KV cache three times larger than
+  # anything ever used - about 1 GB of VRAM that XTTS then could not have.
+  # On a 12 GB card the LLM and the voice model have to share; see
+  # docs/PERFORMANCE.md for the budget.
+  context_tokens: 4096
+  # Replies were coming in at 150-160 tokens anyway. Capping lower shortens the
+  # generation AND the synthesis that follows it - the single biggest lever on
+  # both response time and GPU load.
+  max_output_tokens: 200
+  keep_alive: 30m
+  think: false
+
+character:
+  name: Azmo
+  canonical_name: Azmodan
+  title: Lord of Sin
+  owner_name: Timothy
+  embodiment: machine_incarnation
+  # Every spoken word costs GPU time twice: once generating it, once
+  # synthesizing it. Note GPU - the cooler swap fixed a CPU thermal problem and
+  # is irrelevant to this number.
+  #
+  # Raised 70 -> 85 on 2026-08-05 on better evidence than the PSU: the card's
+  # own lifetime counters read HW Thermal Slowdown 0 us and HW Power Braking
+  # 0 us. It has never once protected itself, uncapped at 350 W, on the old
+  # supply. The 3080 Ti was never the constraint.
+  #
+  # What 85 actually costs, from the measured render ratio (0.62): roughly
+  # +5 s of synthesis and +8 s of speech per reply over 70. Longer cuts both
+  # ways - more room for a real declaration, but a longer wait AND a longer
+  # listen. If replies start feeling like lectures, this is the dial.
+  max_spoken_words: 85
+  theatricality: 0.82
+  strategic_mind: 0.80
+  temptation: 0.62
+  arrogance: 0.78
+  humor: 0.36
+  menace: 0.66
+  warmth: 0.18
+  profanity: free
+
+memory:
+  database_path: data/azmo_memory.sqlite3
+  recent_turns: 8
+  retrieved_memories: 5
+
+motion:
+  hardware_enabled: false
+  max_intensity: 0.75
+  min_duration_ms: 350
+  max_duration_ms: 4500
+  simulator_step_ms: 250
+
+runtime:
+  save_raw_model_output: false
+  log_path: data/azmo_runtime.jsonl
+  warmup_on_chat_start: true
+  show_generation_metrics: true
+  show_gesture_timeline: true
+
+speech:
+  enabled: true
+  # auto order: clone -> piper -> Windows SAPI -> espeak-ng -> silent
+  engine: auto
+  # Voice clone (XTTS v2). Run scripts/prepare_reference.py to create this WAV,
+  # then set engine: clone (or leave auto). Needs the clone extra + a GPU.
+  # A directory of clean clips (XTTS averages them = stronger clone) or a single WAV.
+  clone_reference_path: data/voices/azmo_refs
+  clone_model: tts_models/multilingual/multi-dataset/xtts_v2
+  clone_language: en
+  # auto | cuda | cpu. Set to cpu if XTTS hard-crashes the process
+  # (exit code -1073740791 / 0xC0000409, usually after a cuDNN symbol error):
+  # much slower, but it always produces audio. Run DIAGNOSE_VOICE.bat to find out.
+  clone_device: auto
+  # TRY THIS FIRST if XTTS aborts the process a few seconds into speaking with
+  # "Could not load symbol cudnnGetLibConfig. Error code 127".
+  # That means the cuDNN DLLs here are v8 while torch wants v9, and XTTS dies
+  # when it reaches its convolution-heavy decoder. This keeps XTTS on the GPU
+  # but makes torch use its own conv kernels instead: a little slower, no crash.
+  clone_disable_cudnn: true
+  # Load the voice model at startup rather than at the first reply. Set false if
+  # a voice problem is stopping you from reaching the listening prompt at all.
+  warm_on_start: true
+  # XTTS generation tuning (see 'azmo voicetune' to pick these by ear)
+  # Locked-down for consistency. Low temperature kills the occasional
+  # "drunk Englishman" take with a wandering accent; a fixed non-zero seed makes
+  # the same line render identically every time, so a good take stays good.
+  clone_temperature: 0.26
+  clone_repetition_penalty: 4.0
+  clone_top_k: 45
+  clone_top_p: 0.80
+  clone_length_penalty: 1.0
+  # XTTS's OWN internal splitting stays off - it re-rolled the sampling per
+  # sentence, which is what made some sentences demonic and others generic.
+  # We do the splitting ourselves instead (clone_max_chars below).
+  clone_split_text: false
+  # XTTS generates English in a 250-character window; going past it with
+  # splitting off overruns the model (this was crashing the process outright).
+  # We chunk on sentence boundaries below this length and re-seed every chunk,
+  # so the voice stays in character across a long reply.
+  clone_max_chars: 220
+  clone_chunk_gap_ms: 120    # breath between chunks; 0 = butt them together
+  clone_seed: 20260726
+  # --- streamed delivery (0.2.10) -------------------------------------------
+  # Render chunks while the model is still writing, instead of waiting for the
+  # whole reply. OFF until two things are true, and BOTH need you, not code:
+  #
+  #  1. You have heard it. Whether the chunk seams are audible is an ear
+  #     question, exactly like curating the presence pool.
+  #  2. The machine is known good. Streaming runs the LLM and XTTS at the SAME
+  #     TIME - which is precisely the back-to-back GPU load gpu.stagger_ms was
+  #     added to break up. Do not turn this on before the new cooler and PSU
+  #     are in and the box has been stable through a real session.
+  #
+  # When you do try it, watch the per-turn line for "stalled Nx". Zero stalls
+  # means the prebuffer is deep enough. Any stall means he paused mid-sentence,
+  # which is the one thing this is not allowed to do - raise the prebuffer.
+  stream_playback: false
+  stream_prebuffer_chunks: 2   # rendered chunks held before the first word
+  stream_first_chunk_chars: 60 # how much text the opening chunk waits for
+  stream_prebuffer_timeout_ms: 25000
+  clone_latent_cache: data/voices/azmo_latents.pth
+  # Neural piper base (optional alternative to clone)
+  piper_model_path: null
+  sapi_voice_hint: David
+  volume: 100
+  espeak_base_wpm: 150
+  # global tempo; >1 = faster (the model tends to pick a slow pace)
+  speed: 1.05
+  # azmo-voice demonic DSP, applied after synthesis on every engine.
+  # Dynamic 'blend by moment': heaviness rises on declamatory presets.
+  dsp:
+    enabled: true
+    # WORLD deepening OFF: the clone is already deep; re-synthesis muddies it.
+    # Enable only for a thin base voice (e.g. SAPI). Character = EQ + grit + sub.
+    use_world: false
+    intensity_bias: 0.67
+    # low = consistent register (keeps it locked, never drifts human); 1.0 = full dynamics.
+    # 0.05 keeps a trace of per-line delivery without letting calm lines drift human.
+    heaviness_variation: 0.05
+    pitch_ratio_light: 1.0
+    pitch_ratio_heavy: 1.0
+    formant_ratio_light: 1.0
+    formant_ratio_heavy: 1.0
+    drive_light_db: 4.0
+    drive_heavy_db: 10.0
+    reverb_wet_light: 0.03
+    reverb_wet_heavy: 0.07
+    legion_threshold: 0.80
+    growl_threshold: 0.45
+    # Guttural throat-rasp (raise grit_gain_db toward 0 for more growl)
+    grit_gain_db: -13.0
+    grit_threshold: 0.20
+    grit_drive_db: 17.0
+    # Low-mid mud cut for clarity
+    mud_cut_hz: 330
+    mud_cut_gain_db: -4.0
+    mud_cut_q: 1.0
+    # Clarity: intelligibility boost (~3 kHz) so words cut through
+    clarity_hz: 3000
+    clarity_gain_db: 5.0
+    clarity_q: 1.2
+    # Crisp highs: presence shelf + exciter
+    presence_hz: 7000
+    presence_gain_db: 4.0
+    air_hz: 5000
+    air_gain_db: -12.0
+
+listener:
+  enabled: true
+  wake_word: Azmodan
+  # true = skip the wake word and treat ALL speech as commands. Leave this false:
+  # the wake word is one of the guards against AZMO answering his own voice.
+  always_on: false
+  mic_device: null          # null = default input; or an integer device index
+  # --- wake word recognition ---
+  # "Azmodan" is not in Whisper's vocabulary, so it guesses at ordinary English
+  # that sounds similar: "As Madam", "Az modern", "As been in". Two defences.
+  # 1) Prime the decoder so it produces the name correctly in the first place:
+  whisper_initial_prompt: Azmodan
+  # 2) Match what it does produce by sound, not spelling. Lower = more tolerant
+  #    (more false wakes); 1.0 disables phonetic matching entirely.
+  wake_fuzzy_threshold: 0.72
+  # Exact spellings you have actually seen in the window. Add any mangling that
+  # keeps slipping through - these are matched anywhere in the sentence.
+  extra_wake_variants: []
+  # faster-whisper on the CPU. Keeping it off the GPU leaves the card to the LLM
+  # and the voice, which is half of the power-spike mitigation.
+  whisper_model: small.en
+  whisper_device: cpu
+  whisper_compute_type: int8
+  whisper_cpu_threads: 4     # of 6 cores - leaves headroom for the rest of the box
+  whisper_beam_size: 3       # 1 = fastest, 3-5 = better on unusual words
+  language: en
+  vad_aggressiveness: 1      # 0-3, higher = more aggressive (2 was clipping soft onsets)
+  pre_roll_ms: 500           # audio kept from before the VAD fires, so "Az" is not lost
+  end_silence_ms: 700        # silence that ends your sentence
+  max_utterance_ms: 15000
+  min_utterance_ms: 350      # ignore blips (keystroke, cough, door) - they cause false wakes
+  wake_cooldown_ms: 250
+  follow_up_timeout_ms: 8000 # how long he waits for a command after a bare wake word
+  # --- half-duplex / anti-feedback ---
+  # The mic is gated shut while AZMO thinks and speaks. These cover the moments
+  # around that gate: the speaker tail after playback, and any leak past it.
+  post_speech_cooldown_ms: 700   # raise toward 1200 if speakers are loud or close to the mic
+  echo_guard_window_ms: 8000     # how long his last reply stays "his voice, ignore it"
+  echo_similarity_threshold: 0.6 # 0.6 = 60% of content words matched his reply -> discard
+
+gpu:
+  # ---------------------------------------------------------------------------
+  # EVERYTHING IN THIS SECTION EXCEPT empty_cache_after_speech IS A MITIGATION
+  # FOR ONE DIAGNOSIS: GPU power transients tripping an aging Corsair RM750x.
+  #
+  # Once the Montech Century II 1050 W ATX 3.1 is installed (due 2026-07-31),
+  # these stop paying rent. ATX 3.1 is specified to ride out 200% power
+  # excursions for 100 us, which is precisely the microsecond-scale transient
+  # that was tripping the old supply - so this is not merely more headroom, it
+  # is the right kind. The 3080 Ti (350 W) plus an 8700K on a 1050 W unit is
+  # roughly half load at peak.
+  #
+  # TO RETIRE THEM, swap the two lines marked POST-PSU below. Do it as ONE
+  # change, and not in the same session you first boot the new hardware:
+  # a PSU and an AIO are going in together, so a thermal problem from a bad
+  # pump mount would otherwise look like a power problem. Get one clean
+  # conversation on these settings first, then flip.
+  #
+  # HONEST CAVEAT: the diagnosis was strong but circumstantial - repeated
+  # Kernel-Power 41 with no thermal, no TDR and no WHEA at the crash timestamps.
+  # If hard reboots survive the new PSU, that story is disproven and the 8
+  # unexplained WHEA events (May-Jul 4) become the prime suspect: RAM/XMP, not
+  # power. Put these back and go looking there instead.
+  # ---------------------------------------------------------------------------
+
+  # Temporary board power cap in watts (null = never touch the GPU).
+  # The 3080 Ti's stock limit is 350 W; 250 W clips the transients at almost no
+  # cost to this workload. TEMPORARY: a reboot restores full power, and AZMO
+  # restores it on a clean exit.
+  # BEFORE GAMING: reboot, or run RESTORE_GPU_POWER.bat / 'azmo gpu restore'.
+  power_limit_watts: 250
+  # power_limit_watts: null   # POST-PSU: no cap, no admin prompt, no restore dance
+  apply_on_launch: true     # only works when AZMO is started elevated
+  restore_on_exit: true
+  # Idle gap between the LLM finishing and the voice model starting. Back-to-back
+  # inference is the sharpest current ramp in the pipeline - and 300 ms of pure
+  # added latency on every single turn, paid to protect a supply being replaced.
+  stagger_ms: 300
+  # stagger_ms: 0             # POST-PSU: hand those 300 ms back to the turn
+  # Not a power mitigation - keep this on. Releasing cached VRAM between turns
+  # keeps the LLM and XTTS from both holding peak allocations on a 12 GB card,
+  # which is a memory-headroom concern the new PSU does nothing about.
+  empty_cache_after_speech: true
+
+presence:
+  # The sounds he makes while he is NOT speaking.
+  #
+  # The problem this solves is dead air, not latency. A machine that sits silent
+  # while it thinks reads as broken; one that audibly turns the question over
+  # reads as thinking. That is why a long reply is allowed to be long - provided
+  # the wait is not silent. See docs/DESIGN_LOG.md (2026-07-30).
+  #
+  # Clips are PRE-RENDERED WAVs in clips_path/<kind>/, so firing one costs a file
+  # read rather than a model - no LLM, no XTTS, no GPU, first sound in well under
+  # a second. Build them with 'azmo presence build', or drop in your own.
+  enabled: true
+  clips_path: data/presence
+  on_think: true            # breathe while the LLM works - this is the important one
+  on_wake: true             # one breath after a bare wake word, before your command
+  # Relative likelihood per kind. 0 disables a kind entirely.
+  #   exhale - slow and deliberate; reads as menace and control
+  #   growl  - low and considering; reads as active processing
+  weights:
+    exhale: 1.0
+    growl: 1.0
+  # THE SETTING THAT MATTERS. A single sound at t=0 does nothing for someone
+  # still waiting at t=9. This is the silence between breaths during a long turn.
+  # Too short reads as anxious; too long reopens the dead air.
+  sustain_gap_ms: 2600
+  max_sustain_clips: 4      # cap, so a wedged turn becomes silence not an endless growl
+  avoid_repeat_window: 3    # don't replay a clip until this many others have played
+  # Longest we wait for a breath to finish before he speaks. He must never talk
+  # over his own breath - that reads as a glitch, which is what this removes.
+  max_drain_ms: 2500
+  # Source utterances for 'azmo presence build'. XTTS speaks text, so a non-verbal
+  # is coaxed out of it with breath spellings. Which spellings actually render
+  # convincingly is empirical: render them, listen, delete the bad ones.
+  # Deliberately more than you will keep - curation only ever removes clips, so
+  # starting thin leaves a pool too small to sound varied. Aim to end up with at
+  # least three per kind; below two, selection has no room to be random.
+  exhale_texts: ["Hhhhh...", "Hhhaaah...", "Hnnnh...", "Hhhh. Mm.", "Hhhhhaa.", "Hnnh. Hhh."]
+  growl_texts: ["Mmmmm...", "Hrrrm...", "Mmhrrr...", "Rrrmm. Hm.", "Mmmhm.", "Hrrr. Mmm."]
+  render_preset: close_ominous   # low and close - involuntary, not declaimed
+  render_pace: 0.75
+  # --- variety and envelope (0.2.13) ---------------------------------------
+  # Diagnosed by ear on 2026-08-05: twelve clips, all distinct files, that all
+  # sounded like the same two noises. Cause was not the picker - it was that
+  # every clip rendered from ONE sampling roll.
+  #
+  # speech.clone_seed is fixed so a good spoken take stays good. Presence wants
+  # the opposite: the pool exists so no breath becomes a recognisable tic.
+  # Each clip now renders at base_seed + index * stride, so the pool varies but
+  # a rebuild still reproduces it exactly. 0 = old behaviour.
+  render_seed_stride: 997
+  # Higher than speech's 0.26. That low value kills wandering-accent takes on
+  # words; a wordless breath has no accent to wander, and the extra variance is
+  # the point here. null = inherit speech.clone_temperature.
+  render_temperature: 0.65
+  # Envelope, applied after the DSP.
+  # fade_out kills the rising chirp XTTS puts on a trailing vowel - four of the
+  # six exhale texts end on an open vowel or "...", which the model voices, and
+  # the 7 kHz presence shelf then lifts. fade_in softens the low thump the
+  # octave/sub-growl layers make of a sharp onset (the "bouncy ball").
+  # Asymmetric on purpose: a breath starts abruptly and dies away slowly.
+  fade_in_ms: 20
+  fade_out_ms: 220
+  # Cooldown after the wake breath, instead of listener.post_speech_cooldown_ms.
+  # That 700 ms is sized for a full reply at volume; a short quiet breath has a
+  # much shorter tail. Over-waiting here is NOT harmless - the gate is shut while
+  # you are being invited to speak, so every extra millisecond can eat the first
+  # word of your command. Raise it only if his breath is actually transcribed.
+  wake_ack_cooldown_ms: 200
