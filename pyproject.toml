@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "azmo-mind"
+version = "0.2.15"
+description = "Lore-grounded local Azmodan personality, memory, voice-direction, and safe gesture-intent engine for the AZMO hexapod."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+  "httpx>=0.27,<1",
+  "pydantic>=2.8,<3",
+  "PyYAML>=6.0,<7",
+  "rich>=13.7,<15",
+  "typer>=0.12,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.2,<9", "ruff>=0.6,<1"]
+voice = ["piper-tts>=1.2"]
+dsp = ["pedalboard>=0.9", "soundfile>=0.12", "numpy>=1.24", "pyworld>=0.3"]
+clone = ["coqui-tts==0.24.2", "transformers==4.42.4", "pedalboard>=0.9", "soundfile>=0.12", "numpy>=1.24", "pyworld>=0.3"]
+prep = ["demucs>=4.0", "librosa>=0.10", "noisereduce>=3.0", "soundfile>=0.12", "numpy>=1.24"]
+listen = ["sounddevice>=0.4", "faster-whisper>=1.0", "webrtcvad-wheels>=2.0", "numpy>=1.24"]
+
+[project.scripts]
+azmo = "azmo_mind.cli:app"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
